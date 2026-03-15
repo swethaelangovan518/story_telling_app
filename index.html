@@ -1404,6 +1404,7 @@ function togglePlayerVoice() {
   state.voiceEnabled = !state.voiceEnabled;
   document.getElementById('muteBtn').textContent = state.voiceEnabled ? '🔊' : '🔇';
   if(!state.voiceEnabled && window.speechSynthesis) window.speechSynthesis.cancel();
+  showToast(state.voiceEnabled ? 'Voice narration on' : 'Voice narration off');
 }
 function togglePlayerMusic() {
   state.musicEnabled = !state.musicEnabled;
@@ -1673,21 +1674,140 @@ function createAmbientMusic(mood) {
 }
 
 // ════════════════════════════════════
-// VOICE NARRATION (Web Speech)
+// VOICE NARRATION — DUAL GENDER SYSTEM
 // ════════════════════════════════════
+const VoiceEngine = {
+  ready: false,
+  allVoices: [],
+  maleVoice: null,
+  femaleVoice: null,
+  narratorVoice: null,   // deep male by default
+  characterVoice: null,  // assigned per story
+
+  // Priority lists — browser tries each name in order
+  MALE_NAMES:   ['Daniel', 'Google UK English Male', 'Microsoft David', 'Alex', 'Fred', 'Thomas', 'Eddy', 'Reed', 'Bahh', 'Albert'],
+  FEMALE_NAMES: ['Samantha', 'Google US English', 'Microsoft Zira', 'Karen', 'Moira', 'Tessa', 'Victoria', 'Fiona', 'Nicky', 'Ava', 'Susan'],
+
+  init() {
+    const load = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if(!voices.length) return;
+      this.allVoices = voices.filter(v => v.lang.startsWith('en'));
+
+      // Find best male English voice
+      for(const name of this.MALE_NAMES) {
+        const v = this.allVoices.find(v => v.name.includes(name));
+        if(v) { this.maleVoice = v; break; }
+      }
+      // Find best female English voice
+      for(const name of this.FEMALE_NAMES) {
+        const v = this.allVoices.find(v => v.name.includes(name));
+        if(v) { this.femaleVoice = v; break; }
+      }
+
+      // Fallback: pick any two distinct en voices by gender property
+      if(!this.maleVoice || !this.femaleVoice) {
+        const byGender = (g) => this.allVoices.find(v => (v.name + v.voiceURI).toLowerCase().includes(g));
+        if(!this.maleVoice)   this.maleVoice   = byGender('male')   || this.allVoices[0];
+        if(!this.femaleVoice) this.femaleVoice  = byGender('female') || this.allVoices[1] || this.allVoices[0];
+      }
+
+      // Narrator = deep male; character default = female (changes per story)
+      this.narratorVoice  = this.maleVoice;
+      this.characterVoice = this.femaleVoice;
+      this.ready = true;
+
+      console.log('🎙 Narrator voice:', this.narratorVoice?.name);
+      console.log('🎙 Character voice:', this.characterVoice?.name);
+    };
+
+    if(window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = load;
+    }
+    // Also call immediately — Chrome sometimes has voices ready synchronously
+    load();
+    // And retry after 500ms for slow browsers
+    setTimeout(load, 500);
+    setTimeout(load, 1500);
+  },
+
+  // Assign character voice based on story data
+  assignCharacter(storyData) {
+    // If character name suggests gender, pick accordingly
+    const name = (storyData.character || '').toLowerCase();
+    const femaleHints = ['she','her','lady','queen','witch','princess','woman','girl','detective maya','asha','maya','sara','elena','aria','luna'];
+    const maleHints   = ['he','him','lord','king','wizard','prince','man','boy','detective cole','marco','ryan','james','ethan'];
+    const isFemale = femaleHints.some(h => name.includes(h));
+    const isMale   = maleHints.some(h => name.includes(h));
+    if(isFemale)      this.characterVoice = this.femaleVoice;
+    else if(isMale)   this.characterVoice = this.maleVoice;
+    else              this.characterVoice = this.femaleVoice; // default character = female
+    // Ensure narrator ≠ character when same voice is assigned
+    if(this.characterVoice === this.narratorVoice && this.femaleVoice && this.maleVoice) {
+      this.characterVoice = (this.narratorVoice === this.maleVoice) ? this.femaleVoice : this.maleVoice;
+    }
+  },
+
+  speak(text, speaker) {
+    if(!state.voiceEnabled) return;
+    if(!window.speechSynthesis) return;
+
+    // Cancel any current speech
+    window.speechSynthesis.cancel();
+
+    const isNarrator = !speaker || speaker === 'NARRATOR';
+    const utter = new SpeechSynthesisUtterance(text);
+
+    if(isNarrator) {
+      // NARRATOR — deep, slow, gravelly male voice
+      utter.voice  = this.narratorVoice;
+      utter.rate   = 0.78;
+      utter.pitch  = 0.75;
+      utter.volume = 1.0;
+    } else {
+      // CHARACTER — distinct voice, slightly faster & higher
+      utter.voice  = this.characterVoice;
+      utter.rate   = 0.88;
+      utter.pitch  = 1.15;
+      utter.volume = 1.0;
+    }
+
+    // Chrome bug: long utterances get silently cut. Split at sentence boundaries.
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    if(sentences.length > 1) {
+      let idx = 0;
+      const speakNext = () => {
+        if(idx >= sentences.length || !state.voiceEnabled) return;
+        const u = new SpeechSynthesisUtterance(sentences[idx++].trim());
+        u.voice  = utter.voice;
+        u.rate   = utter.rate;
+        u.pitch  = utter.pitch;
+        u.volume = utter.volume;
+        u.onend  = speakNext;
+        window.speechSynthesis.speak(u);
+      };
+      speakNext();
+    } else {
+      window.speechSynthesis.speak(utter);
+    }
+
+    state.speechUtterance = utter;
+
+    // Chrome iOS workaround: resume if suspended
+    if(window.speechSynthesis.paused) window.speechSynthesis.resume();
+  }
+};
+
+// Shim: replace old speak() with VoiceEngine
 function speak(text, speaker) {
-  if(!state.voiceEnabled || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 0.82;
-  utterance.pitch = speaker === 'NARRATOR' ? 0.9 : 1.05;
-  utterance.volume = 0.7;
-  // Try to find a good voice
-  const voices = window.speechSynthesis.getVoices();
-  const preferred = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Daniel') || v.name.includes('Google') || v.name.includes('Samantha')));
-  if(preferred) utterance.voice = preferred;
-  window.speechSynthesis.speak(utterance);
-  state.speechUtterance = utterance;
+  // Gate behind voiceEnabled
+  if(!state.voiceEnabled) return;
+  // If voices not loaded yet, retry in 600ms
+  if(!VoiceEngine.ready) {
+    setTimeout(() => speak(text, speaker), 600);
+    return;
+  }
+  VoiceEngine.speak(text, speaker);
 }
 
 // ════════════════════════════════════
@@ -1760,9 +1880,13 @@ function renderScene(scene, storyData) {
     document.getElementById('characterAvatar').classList.remove('visible');
   }
 
-  // Speaker
-  document.getElementById('dialogueSpeaker').textContent =
-    scene.speaker === 'NARRATOR' ? '— Narrator —' : scene.speaker || '';
+  // Speaker label with voice gender badge
+  const isNarrator = !scene.speaker || scene.speaker === 'NARRATOR';
+  const voiceBadge = isNarrator
+    ? '<span style="font-size:0.55rem;opacity:0.5;margin-left:8px;letter-spacing:0.1em;">♂ MALE VOICE</span>'
+    : '<span style="font-size:0.55rem;opacity:0.5;margin-left:8px;letter-spacing:0.1em;">♀ FEMALE VOICE</span>';
+  document.getElementById('dialogueSpeaker').innerHTML =
+    (isNarrator ? '— Narrator —' : scene.speaker || '') + voiceBadge;
 
   // Clear choices + continue
   document.getElementById('choicesContainer').innerHTML = '';
@@ -1888,6 +2012,9 @@ function openPlayer(storyData) {
   if(!sceneBgSystem) {
     sceneBgSystem = new SceneBackground(document.getElementById('sceneBgCanvas'));
   }
+
+  // Assign character voice gender based on story
+  VoiceEngine.assignCharacter(storyData);
 
   // Init video engine
   if(!videoEngine) {
@@ -2040,11 +2167,7 @@ document.addEventListener('keydown', e => {
 // INIT
 // ════════════════════════════════════
 renderCatalog();
-
-// Load voices async
-if(window.speechSynthesis) {
-  window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-}
+VoiceEngine.init();
 </script>
 </body>
 </html>
