@@ -544,6 +544,13 @@ body {
 .continue-btn .arrow { transition: transform 0.3s; }
 .continue-btn:hover .arrow { transform: translateX(5px); }
 
+@keyframes hintFade {
+  0%   { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+  15%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 /* ══════════════════════════════════════
    TOAST
 ══════════════════════════════════════ */
@@ -989,6 +996,16 @@ footer {
   <canvas id="particleCanvas"></canvas>
 
   <div class="player-ui">
+    <!-- Mobile voice hint — fades out after 3s -->
+    <div id="voiceHint" style="
+      display:none; position:absolute; top:70px; left:50%; transform:translateX(-50%);
+      z-index:20; background:rgba(201,168,76,0.15); border:1px solid rgba(201,168,76,0.4);
+      backdrop-filter:blur(10px); padding:10px 20px; white-space:nowrap;
+      font-family:'Cinzel',serif; font-size:0.62rem; letter-spacing:0.15em;
+      color:var(--gold); text-align:center; pointer-events:none;
+      animation: hintFade 3.5s ease-out forwards;
+    ">🔊 TAP ANYWHERE TO HEAR VOICES</div>
+
     <!-- Top bar -->
     <div class="player-top">
       <div class="player-story-title" id="playerStoryTitle">MYTHOS</div>
@@ -1674,139 +1691,167 @@ function createAmbientMusic(mood) {
 }
 
 // ════════════════════════════════════
-// VOICE NARRATION — DUAL GENDER SYSTEM
+// VOICE ENGINE — MOBILE-FIRST DUAL GENDER
 // ════════════════════════════════════
 const VoiceEngine = {
   ready: false,
+  unlocked: false,       // iOS requires a real user-gesture before any speech
   allVoices: [],
   maleVoice: null,
   femaleVoice: null,
-  narratorVoice: null,   // deep male by default
-  characterVoice: null,  // assigned per story
+  narratorVoice: null,
+  characterVoice: null,
+  keepaliveTimer: null,
 
-  // Priority lists — browser tries each name in order
-  MALE_NAMES:   ['Daniel', 'Google UK English Male', 'Microsoft David', 'Alex', 'Fred', 'Thomas', 'Eddy', 'Reed', 'Bahh', 'Albert'],
-  FEMALE_NAMES: ['Samantha', 'Google US English', 'Microsoft Zira', 'Karen', 'Moira', 'Tessa', 'Victoria', 'Fiona', 'Nicky', 'Ava', 'Susan'],
+  MALE_NAMES:   ['Daniel','Google UK English Male','Microsoft David','Alex','Fred','Thomas','Eddy','Reed','Aaron','Arthur','Oliver'],
+  FEMALE_NAMES: ['Samantha','Google US English','Microsoft Zira','Karen','Moira','Tessa','Victoria','Fiona','Nicky','Ava','Susan','Catherine'],
 
-  init() {
-    const load = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if(!voices.length) return;
-      this.allVoices = voices.filter(v => v.lang.startsWith('en'));
+  // ── Load available voices ──────────────────────────────
+  loadVoices() {
+    const all = window.speechSynthesis.getVoices();
+    if(!all.length) return false;
 
-      // Find best male English voice
-      for(const name of this.MALE_NAMES) {
-        const v = this.allVoices.find(v => v.name.includes(name));
+    // Prefer en-US / en-GB; fall back to any 'en'
+    const en = all.filter(v => v.lang.startsWith('en'));
+    this.allVoices = en.length ? en : all;
+
+    // Find male
+    if(!this.maleVoice) {
+      for(const n of this.MALE_NAMES) {
+        const v = this.allVoices.find(v => v.name.includes(n));
         if(v) { this.maleVoice = v; break; }
       }
-      // Find best female English voice
-      for(const name of this.FEMALE_NAMES) {
-        const v = this.allVoices.find(v => v.name.includes(name));
+    }
+    // Find female
+    if(!this.femaleVoice) {
+      for(const n of this.FEMALE_NAMES) {
+        const v = this.allVoices.find(v => v.name.includes(n));
         if(v) { this.femaleVoice = v; break; }
       }
-
-      // Fallback: pick any two distinct en voices by gender property
-      if(!this.maleVoice || !this.femaleVoice) {
-        const byGender = (g) => this.allVoices.find(v => (v.name + v.voiceURI).toLowerCase().includes(g));
-        if(!this.maleVoice)   this.maleVoice   = byGender('male')   || this.allVoices[0];
-        if(!this.femaleVoice) this.femaleVoice  = byGender('female') || this.allVoices[1] || this.allVoices[0];
-      }
-
-      // Narrator = deep male; character default = female (changes per story)
-      this.narratorVoice  = this.maleVoice;
-      this.characterVoice = this.femaleVoice;
-      this.ready = true;
-
-      console.log('🎙 Narrator voice:', this.narratorVoice?.name);
-      console.log('🎙 Character voice:', this.characterVoice?.name);
-    };
-
-    if(window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = load;
     }
-    // Also call immediately — Chrome sometimes has voices ready synchronously
-    load();
-    // And retry after 500ms for slow browsers
-    setTimeout(load, 500);
-    setTimeout(load, 1500);
+    // Final fallback — pick two different voices
+    if(!this.maleVoice && this.allVoices.length)   this.maleVoice   = this.allVoices[0];
+    if(!this.femaleVoice && this.allVoices.length > 1) this.femaleVoice = this.allVoices[1];
+    if(!this.femaleVoice) this.femaleVoice = this.maleVoice;
+
+    this.narratorVoice  = this.maleVoice;
+    this.characterVoice = this.femaleVoice;
+    this.ready = true;
+    console.log('🎙 Voices ready | Narrator:', this.narratorVoice?.name, '| Character:', this.characterVoice?.name);
+    return true;
   },
 
-  // Assign character voice based on story data
+  // ── Init — called once at page load ───────────────────
+  init() {
+    if(!window.speechSynthesis) return;
+    const tryLoad = () => this.loadVoices();
+    window.speechSynthesis.onvoiceschanged = tryLoad;
+    tryLoad();
+    setTimeout(tryLoad, 300);
+    setTimeout(tryLoad, 800);
+    setTimeout(tryLoad, 2000);
+  },
+
+  // ── UNLOCK — MUST be called synchronously inside a tap handler ──
+  // iOS Safari blocks all speech unless the FIRST utterance is spoken
+  // inside a direct user-gesture callback (onclick, ontouchend, etc.)
+  unlock() {
+    if(this.unlocked || !window.speechSynthesis) return;
+    try {
+      const u = new SpeechSynthesisUtterance('');
+      u.volume = 0;
+      u.rate   = 10; // instant — no audible output
+      window.speechSynthesis.speak(u);
+      this.unlocked = true;
+      console.log('🔓 SpeechSynthesis unlocked for mobile');
+    } catch(e) { console.warn('unlock failed', e); }
+  },
+
+  // ── Assign voices per story character ─────────────────
   assignCharacter(storyData) {
-    // If character name suggests gender, pick accordingly
+    if(!this.ready) return;
     const name = (storyData.character || '').toLowerCase();
-    const femaleHints = ['she','her','lady','queen','witch','princess','woman','girl','detective maya','asha','maya','sara','elena','aria','luna'];
-    const maleHints   = ['he','him','lord','king','wizard','prince','man','boy','detective cole','marco','ryan','james','ethan'];
+    const femaleHints = ['she','her','lady','queen','witch','princess','woman','girl','maya','asha','sara','elena','aria','luna','nora','alice','diana','ivy'];
+    const maleHints   = ['he','him','lord','king','wizard','prince','man','boy','cole','marco','ryan','james','ethan','luca','noah','theo','finn'];
     const isFemale = femaleHints.some(h => name.includes(h));
     const isMale   = maleHints.some(h => name.includes(h));
-    if(isFemale)      this.characterVoice = this.femaleVoice;
-    else if(isMale)   this.characterVoice = this.maleVoice;
-    else              this.characterVoice = this.femaleVoice; // default character = female
-    // Ensure narrator ≠ character when same voice is assigned
-    if(this.characterVoice === this.narratorVoice && this.femaleVoice && this.maleVoice) {
+    this.characterVoice = isMale ? this.maleVoice : this.femaleVoice;
+    // Always keep narrator ≠ character voice
+    if(this.characterVoice === this.narratorVoice && this.maleVoice !== this.femaleVoice) {
       this.characterVoice = (this.narratorVoice === this.maleVoice) ? this.femaleVoice : this.maleVoice;
     }
   },
 
-  speak(text, speaker) {
-    if(!state.voiceEnabled) return;
-    if(!window.speechSynthesis) return;
+  // ── Android keepalive — prevents speech from being killed ─
+  startKeepalive() {
+    this.stopKeepalive();
+    this.keepaliveTimer = setInterval(() => {
+      if(!window.speechSynthesis) return;
+      if(window.speechSynthesis.speaking) return; // already active
+      if(window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+    }, 5000);
+  },
+  stopKeepalive() {
+    if(this.keepaliveTimer) { clearInterval(this.keepaliveTimer); this.keepaliveTimer = null; }
+  },
 
-    // Cancel any current speech
+  // ── Core speak ─────────────────────────────────────────
+  speak(text, speaker) {
+    if(!state.voiceEnabled || !window.speechSynthesis) return;
+
+    // If voices not loaded yet, retry shortly
+    if(!this.ready) {
+      this.loadVoices();
+      setTimeout(() => this.speak(text, speaker), 700);
+      return;
+    }
+
     window.speechSynthesis.cancel();
 
     const isNarrator = !speaker || speaker === 'NARRATOR';
-    const utter = new SpeechSynthesisUtterance(text);
+    const voice  = isNarrator ? this.narratorVoice  : this.characterVoice;
+    const rate   = isNarrator ? 0.80 : 0.90;
+    const pitch  = isNarrator ? 0.78 : 1.15;
 
-    if(isNarrator) {
-      // NARRATOR — deep, slow, gravelly male voice
-      utter.voice  = this.narratorVoice;
-      utter.rate   = 0.78;
-      utter.pitch  = 0.75;
-      utter.volume = 1.0;
-    } else {
-      // CHARACTER — distinct voice, slightly faster & higher
-      utter.voice  = this.characterVoice;
-      utter.rate   = 0.88;
-      utter.pitch  = 1.15;
-      utter.volume = 1.0;
-    }
+    // Split into sentences to beat Chrome's ~200-char cutoff
+    const parts = text.match(/[^.!?…]+[.!?…]*[\s]*/g) || [text];
+    let idx = 0;
 
-    // Chrome bug: long utterances get silently cut. Split at sentence boundaries.
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-    if(sentences.length > 1) {
-      let idx = 0;
-      const speakNext = () => {
-        if(idx >= sentences.length || !state.voiceEnabled) return;
-        const u = new SpeechSynthesisUtterance(sentences[idx++].trim());
-        u.voice  = utter.voice;
-        u.rate   = utter.rate;
-        u.pitch  = utter.pitch;
-        u.volume = utter.volume;
-        u.onend  = speakNext;
-        window.speechSynthesis.speak(u);
+    const next = () => {
+      if(idx >= parts.length || !state.voiceEnabled) return;
+      const chunk = parts[idx++].trim();
+      if(!chunk) { next(); return; }
+
+      const u = new SpeechSynthesisUtterance(chunk);
+      if(voice) u.voice = voice;
+      u.rate   = rate;
+      u.pitch  = pitch;
+      u.volume = 1.0;
+      u.lang   = 'en-US';
+
+      u.onend   = next;
+      u.onerror = (e) => {
+        // 'interrupted' is normal when scene changes; anything else log it
+        if(e.error !== 'interrupted') console.warn('TTS error:', e.error, chunk);
       };
-      speakNext();
-    } else {
-      window.speechSynthesis.speak(utter);
-    }
 
-    state.speechUtterance = utter;
+      window.speechSynthesis.speak(u);
 
-    // Chrome iOS workaround: resume if suspended
-    if(window.speechSynthesis.paused) window.speechSynthesis.resume();
+      // iOS/Android: resume if somehow paused mid-sentence
+      setTimeout(() => {
+        if(window.speechSynthesis.paused) window.speechSynthesis.resume();
+      }, 200);
+    };
+
+    next();
   }
 };
 
-// Shim: replace old speak() with VoiceEngine
+// ── Public shim ────────────────────────────────────────────
 function speak(text, speaker) {
-  // Gate behind voiceEnabled
   if(!state.voiceEnabled) return;
-  // If voices not loaded yet, retry in 600ms
-  if(!VoiceEngine.ready) {
-    setTimeout(() => speak(text, speaker), 600);
-    return;
-  }
   VoiceEngine.speak(text, speaker);
 }
 
@@ -2003,6 +2048,39 @@ function openPlayer(storyData) {
   state.currentScene = 0;
   document.getElementById('playerStoryTitle').textContent = storyData.title || 'MYTHOS';
 
+  // ── MOBILE AUDIO UNLOCK ──────────────────────────────
+  // Must be called synchronously inside a user-gesture handler.
+  VoiceEngine.unlock();
+  VoiceEngine.loadVoices();
+  VoiceEngine.startKeepalive();
+
+  // Show mobile voice hint on touch devices
+  const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  if(isTouchDevice && state.voiceEnabled) {
+    const hint = document.getElementById('voiceHint');
+    if(hint) {
+      hint.style.display = 'block';
+      // Reset animation
+      hint.style.animation = 'none';
+      hint.offsetHeight; // reflow
+      hint.style.animation = 'hintFade 3.5s ease-out forwards';
+      setTimeout(() => { hint.style.display = 'none'; }, 3600);
+    }
+  }
+
+  // One-time tap fallback: if speech didn't start (common on Android WebView),
+  // the next tap anywhere on the player re-speaks the current scene
+  const playerEl2 = document.getElementById('player');
+  const tapFallback = () => {
+    if(!window.speechSynthesis?.speaking && state.voiceEnabled && state.story.length) {
+      VoiceEngine.unlock();
+      const scene = state.story[state.currentScene] || state.story[0];
+      if(scene) VoiceEngine.speak(scene.text, scene.speaker);
+    }
+    playerEl2.removeEventListener('touchend', tapFallback);
+  };
+  setTimeout(() => playerEl2.addEventListener('touchend', tapFallback, {once:true}), 2000);
+
   // Init particle system
   if(!state.particleSystem) {
     state.particleSystem = new ParticleSystem(document.getElementById('particleCanvas'));
@@ -2042,6 +2120,7 @@ function closePlayer() {
   if(videoEngine) videoEngine.stop();
   if(state.audioCtx) { try { state.audioCtx.close(); } catch(e){} state.audioCtx = null; }
   if(window.speechSynthesis) window.speechSynthesis.cancel();
+  VoiceEngine.stopKeepalive();
   if(state.typingTimer) clearTimeout(state.typingTimer);
 }
 
